@@ -25,8 +25,17 @@
     font-size: 15px; font-weight: 700; color: #fff; background: #2563eb; cursor: pointer;
   }
   button.alt { background: #475569; }
-  #reader { border-radius: 10px; overflow: hidden; background: #000; }
-  #reader:empty { display: none; }
+  /* Container kamera WAJIB punya lebar nyata sebelum scanner dinyalakan.
+     Karena itu disembunyikan lewat class .off, bukan :empty. */
+  #reader { width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
+  #reader.off { display: none; }
+  #reader video { width: 100% !important; height: auto !important; display: block; }
+  #reader__scan_region > img { display: none; }
+  #camList {
+    width: 100%; padding: 10px; margin-top: 8px; border-radius: 8px;
+    border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 14px;
+  }
+  #camInfo { font-size: 11px; color: #64748b; margin-top: 6px; word-break: break-word; }
   .hasil { border-radius: 12px; padding: 18px; text-align: center; margin-bottom: 12px; display: none; }
   .hasil.on { display: block; }
   .hasil .ikon { font-size: 40px; line-height: 1; }
@@ -66,8 +75,10 @@
     <div id="hasil" class="hasil"></div>
 
     <div class="card">
-      <div id="reader"></div>
+      <div id="reader" class="off"></div>
+      <select id="camList" class="hide" onchange="gantiKamera()"></select>
       <div id="camNote" class="note hide"></div>
+      <div id="camInfo"></div>
       <button id="btnCam" class="alt" onclick="toggleKamera()">Nyalakan Kamera</button>
     </div>
 
@@ -169,37 +180,189 @@ function tampil(jenis, ikon, judul, ket, kode) {
 
 function getar(pola) { try { if (navigator.vibrate) navigator.vibrate(pola); } catch (e) {} }
 
+/* ============================================================
+ *  KAMERA
+ *  html5-qrcode mengukur lebar container saat start(). Kalau container
+ *  masih display:none, video dirender berukuran nol — kamera menyala
+ *  tapi layar kosong. Karena itu #reader ditampilkan lebih dulu.
+ * ============================================================ */
+var KAMERA = [];
+
+function byId(id) { return document.getElementById(id); }
+
 function toggleKamera() {
-  var btn = document.getElementById('btnCam');
-  var note = document.getElementById('camNote');
+  if (kameraAktif) matikanKamera();
+  else nyalakanKamera();
+}
 
-  if (kameraAktif) {
-    scanner.stop().then(function () {
-      scanner.clear(); kameraAktif = false; btn.textContent = 'Nyalakan Kamera';
-    });
-    return;
-  }
+function nyalakanKamera() {
+  var btn = byId('btnCam');
+
   if (typeof Html5Qrcode === 'undefined') {
-    note.classList.remove('hide');
-    note.textContent = 'Library scanner gagal dimuat. Periksa koneksi internet.';
+    pesanKamera('Library scanner gagal dimuat. Periksa koneksi internet, lalu muat ulang halaman.');
+    return;
+  }
+  if (!location.protocol.match(/^https:/) && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) {
+    pesanKamera('Halaman ini dibuka lewat <b>' + esc(location.protocol) + '</b>. ' +
+      'Browser hanya mengizinkan kamera pada <b>https://</b> atau <b>http://localhost</b>.<br>' +
+      'Unggah berkas ini ke GitHub Pages / Netlify Drop / Cloudflare Pages, lalu buka dari sana.');
     return;
   }
 
-  btn.disabled = true; note.classList.add('hide');
-  scanner = scanner || new Html5Qrcode('reader');
+  btn.disabled = true;
+  btn.textContent = 'Menyalakan…';
+  byId('camNote').classList.add('hide');
+  byId('reader').classList.remove('off');   // tampilkan container SEBELUM start()
 
-  scanner.start({ facingMode: 'environment' },
-    { fps: 10, qrbox: { width: 240, height: 240 } },
-    function (teks) { kirim(teks); }, function () {}
-  ).then(function () {
-    kameraAktif = true; btn.disabled = false; btn.textContent = 'Matikan Kamera';
-  }).catch(function (err) {
-    btn.disabled = false;
-    note.classList.remove('hide');
-    note.innerHTML = 'Kamera ditolak: ' + err + '<br>' +
-      'Kamera hanya bisa diakses lewat <b>https://</b> atau <b>http://localhost</b>. ' +
-      'Bila membuka berkas ini langsung dari HP, unggah dulu ke GitHub Pages / hosting statis apa pun.';
-  });
+  scanner = scanner || new Html5Qrcode('reader', { verbose: false });
+  setTimeout(pilihSumberKamera, 200);
+}
+
+function konfigScan() {
+  return {
+    fps: 10,
+    qrbox: function (w, h) {
+      var m = Math.floor(Math.min(w, h) * 0.7);
+      return { width: m, height: m };
+    },
+    aspectRatio: 1.0,
+    disableFlip: false,
+    experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+  };
+}
+
+function onScan(teks) { kirim(teks); }
+
+function pilihSumberKamera() {
+  var urutan = [
+    { facingMode: { exact: 'environment' } },
+    { facingMode: 'environment' },
+    { facingMode: 'user' }
+  ];
+
+  function coba(i) {
+    if (i >= urutan.length) { cobaLewatDaftarKamera(); return; }
+    scanner.start(urutan[i], konfigScan(), onScan, function () {})
+      .then(kameraSiap)
+      .catch(function () { coba(i + 1); });
+  }
+  coba(0);
+}
+
+function cobaLewatDaftarKamera() {
+  Html5Qrcode.getCameras().then(function (devs) {
+    KAMERA = devs || [];
+    if (!KAMERA.length) throw new Error('Tidak ada kamera yang terdeteksi.');
+    isiDaftarKamera();
+    var belakang = KAMERA.filter(function (d) {
+      return /back|rear|belakang|environment/i.test(d.label || '');
+    })[0] || KAMERA[KAMERA.length - 1];
+    return scanner.start(belakang.id, konfigScan(), onScan, function () {});
+  }).then(kameraSiap).catch(gagalKamera);
+}
+
+function kameraSiap() {
+  kameraAktif = true;
+  var btn = byId('btnCam');
+  btn.disabled = false;
+  btn.textContent = 'Matikan Kamera';
+
+  var v = document.querySelector('#reader video');
+  if (v) {
+    v.setAttribute('playsinline', 'true');  // iOS: tanpa ini video tidak tampil inline
+    v.setAttribute('muted', 'true');
+    v.style.width = '100%';
+    v.style.height = 'auto';
+    v.style.display = 'block';
+    var p = v.play();
+    if (p && p.catch) p.catch(function () {});
+  }
+
+  if (!KAMERA.length && Html5Qrcode.getCameras) {
+    Html5Qrcode.getCameras().then(function (devs) {
+      KAMERA = devs || []; isiDaftarKamera();
+    }).catch(function () {});
+  }
+
+  setTimeout(function () {
+    var vid = document.querySelector('#reader video');
+    if (!vid || !vid.videoWidth) {
+      byId('camInfo').textContent = '';
+      pesanKamera('Kamera menyala tetapi gambar tidak muncul (video 0 piksel). ' +
+                  'Coba pilih kamera lain pada daftar di atas, atau ketik kode manual.');
+    } else {
+      byId('camInfo').textContent =
+        'Kamera aktif · ' + vid.videoWidth + '×' + vid.videoHeight +
+        ' · arahkan QR ke dalam kotak';
+    }
+  }, 1500);
+}
+
+function gagalKamera(err) {
+  var btn = byId('btnCam');
+  kameraAktif = false;
+  btn.disabled = false;
+  btn.textContent = 'Nyalakan Kamera';
+  byId('reader').classList.add('off');
+  byId('camInfo').textContent = '';
+
+  var nama = (err && err.name) ? err.name : '';
+  var teks;
+  if (nama === 'NotAllowedError' || /permission|denied|ditolak/i.test(String(err))) {
+    teks = 'Izin kamera ditolak browser. Ketuk ikon gembok di address bar &rarr; ' +
+           'Izin situs &rarr; Kamera &rarr; Izinkan, lalu muat ulang.';
+  } else if (nama === 'NotFoundError' || /no camera|tidak ada kamera/i.test(String(err))) {
+    teks = 'Tidak ada kamera yang terdeteksi pada perangkat ini.';
+  } else if (nama === 'NotReadableError') {
+    teks = 'Kamera sedang dipakai aplikasi lain. Tutup aplikasi kamera / video call, lalu coba lagi.';
+  } else {
+    teks = 'Kamera gagal dibuka: ' + esc(String(err));
+  }
+  pesanKamera(teks + '<br><br>Kode tiket tetap bisa diketik manual di bawah.');
+}
+
+function matikanKamera() {
+  var btn = byId('btnCam');
+  btn.disabled = true;
+  scanner.stop().then(function () { scanner.clear(); })
+    .catch(function () {})
+    .then(function () {
+      kameraAktif = false;
+      btn.disabled = false;
+      btn.textContent = 'Nyalakan Kamera';
+      byId('reader').classList.add('off');
+      byId('camInfo').textContent = '';
+    });
+}
+
+function isiDaftarKamera() {
+  if (KAMERA.length < 1) return;
+  var sel = byId('camList');
+  sel.innerHTML = KAMERA.map(function (d, i) {
+    return '<option value="' + esc(d.id) + '">' +
+           esc(d.label || ('Kamera ' + (i + 1))) + '</option>';
+  }).join('');
+  sel.classList.remove('hide');
+}
+
+function gantiKamera() {
+  var id = byId('camList').value;
+  if (!id || !scanner) return;
+
+  byId('camNote').classList.add('hide');
+  var lanjut = kameraAktif ? scanner.stop() : Promise.resolve();
+
+  lanjut.then(function () {
+    kameraAktif = false;
+    byId('reader').classList.remove('off');
+    return scanner.start(id, konfigScan(), onScan, function () {});
+  }).then(kameraSiap).catch(gagalKamera);
+}
+
+function pesanKamera(html) {
+  var note = byId('camNote');
+  note.classList.remove('hide');
+  note.innerHTML = html;
 }
 
 (function () {
