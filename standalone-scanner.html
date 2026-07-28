@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scanner Check-in (Standalone)</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0;
+    font-family: -apple-system, Roboto, Arial, sans-serif; font-size: 15px;
+  }
+  .app { max-width: 460px; margin: 0 auto; }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  .sub { color: #94a3b8; font-size: 12px; margin-bottom: 14px; line-height: 1.5; }
+  .card { background: #1e293b; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 5px; }
+  input {
+    width: 100%; padding: 12px; border: 1px solid #334155; border-radius: 8px;
+    background: #0f172a; color: #e2e8f0; font-size: 16px;
+  }
+  input#kode { font-family: monospace; letter-spacing: 1px; text-transform: uppercase; }
+  button {
+    width: 100%; padding: 13px; border: 0; border-radius: 8px; margin-top: 8px;
+    font-size: 15px; font-weight: 700; color: #fff; background: #2563eb; cursor: pointer;
+  }
+  button.alt { background: #475569; }
+  #reader { border-radius: 10px; overflow: hidden; background: #000; }
+  #reader:empty { display: none; }
+  .hasil { border-radius: 12px; padding: 18px; text-align: center; margin-bottom: 12px; display: none; }
+  .hasil.on { display: block; }
+  .hasil .ikon { font-size: 40px; line-height: 1; }
+  .hasil .judul { font-size: 19px; font-weight: 800; margin: 6px 0; }
+  .hasil .ket { font-size: 13px; opacity: .9; margin-top: 6px; }
+  .hasil .kode { font-family: monospace; font-size: 12px; opacity: .75; margin-top: 8px; }
+  .h-ok { background: #065f46; color: #d1fae5; }
+  .h-warn { background: #92400e; color: #fef3c7; }
+  .h-err { background: #991b1b; color: #fee2e2; }
+  .note { font-size: 12px; color: #94a3b8; line-height: 1.5; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div id="setup">
+    <h1>Scanner Check-in — Standalone</h1>
+    <div class="sub">
+      Halaman ini berjalan di luar iframe Google, sehingga <b>kamera HP bisa dipakai</b>.
+      Isi URL web app dan PIN panitia sekali saja; keduanya tersimpan di perangkat ini.
+    </div>
+    <div class="card">
+      <label>URL Web App (.../exec)</label>
+      <input id="url" placeholder="https://script.google.com/macros/s/AKfy.../exec">
+      <label style="margin-top:10px;">PIN Panitia</label>
+      <input id="pin" type="tel" inputmode="numeric" placeholder="••••••">
+      <button onclick="simpan()">Simpan &amp; Mulai</button>
+      <div id="setupMsg" class="note" style="margin-top:8px;color:#fca5a5;"></div>
+    </div>
+  </div>
+
+  <div id="main" class="hide">
+    <h1>Check-in</h1>
+    <div class="sub">Scan QR e-ticket, atau ketik kodenya manual.</div>
+
+    <div id="hasil" class="hasil"></div>
+
+    <div class="card">
+      <div id="reader"></div>
+      <div id="camNote" class="note hide"></div>
+      <button id="btnCam" class="alt" onclick="toggleKamera()">Nyalakan Kamera</button>
+    </div>
+
+    <div class="card">
+      <label>Kode Tiket (manual / scanner barcode USB)</label>
+      <input id="kode" placeholder="TF26-0001-A1B2" autocomplete="off"
+             onkeydown="if(event.key==='Enter') kirim(this.value)">
+      <button onclick="kirim(document.getElementById('kode').value)">Check-in</button>
+      <button class="alt" onclick="kirim(document.getElementById('kode').value, true)">Cek Status Saja</button>
+      <button class="alt" onclick="resetSetup()">Ganti URL / PIN</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+var URL_EXEC = '', PIN = '', scanner = null, kameraAktif = false, sibuk = false;
+var terakhir = '', terakhirWaktu = 0;
+
+function simpan() {
+  var u = document.getElementById('url').value.trim();
+  var p = document.getElementById('pin').value.trim();
+  if (!/\/exec$/.test(u)) {
+    document.getElementById('setupMsg').textContent = 'URL harus diakhiri dengan /exec';
+    return;
+  }
+  if (!p) { document.getElementById('setupMsg').textContent = 'PIN belum diisi.'; return; }
+
+  URL_EXEC = u; PIN = p;
+  try { localStorage.setItem('etix_url', u); localStorage.setItem('etix_pin', p); } catch (e) {}
+  document.getElementById('setup').classList.add('hide');
+  document.getElementById('main').classList.remove('hide');
+  document.getElementById('kode').focus();
+}
+
+function resetSetup() {
+  document.getElementById('setup').classList.remove('hide');
+  document.getElementById('main').classList.add('hide');
+}
+
+function kirim(kode, cekSaja) {
+  kode = String(kode || '').trim().toUpperCase();
+  if (!kode || sibuk) return;
+
+  var now = Date.now();
+  if (kode === terakhir && now - terakhirWaktu < 3000) return;
+  terakhir = kode; terakhirWaktu = now;
+
+  sibuk = true;
+  tampil('warn', '&#8987;', 'Memproses…', '', kode);
+
+  var url = URL_EXEC + '?action=' + (cekSaja ? 'cek' : 'checkin') +
+            '&code=' + encodeURIComponent(kode) + '&pin=' + encodeURIComponent(PIN);
+
+  fetch(url, { method: 'GET', redirect: 'follow' })
+    .then(function (r) { return r.json(); })
+    .then(function (res) { sibuk = false; tampilHasil(res, kode); })
+    .catch(function (e) {
+      sibuk = false;
+      tampil('err', '&#9888;', 'GAGAL TERHUBUNG',
+        e.message + '<br>Periksa koneksi internet dan URL web app.', kode);
+    });
+
+  document.getElementById('kode').value = '';
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function tampilHasil(res, kode) {
+  if (res.status === 'MASUK') {
+    tampil('ok', '&#10004;', 'SILAKAN MASUK',
+      esc(res.nama) + '<br>' + esc(res.jenis) + ' - ' + esc(res.jumlah) + ' orang', res.kode);
+    getar([120, 60, 120]);
+  } else if (res.status === 'SUDAH_MASUK') {
+    tampil('warn', '&#8635;', 'SUDAH CHECK-IN',
+      esc(res.nama) + '<br>' + esc(res.message), res.kode);
+    getar([400]);
+  } else if (res.status === 'INFO') {
+    tampil('warn', '&#8505;', esc(res.statusBayar),
+      esc(res.nama) + '<br>' + esc(res.statusCheckin), res.kode);
+  } else {
+    tampil('err', '&#10008;', 'TIDAK BOLEH MASUK',
+      (res.nama ? esc(res.nama) + '<br>' : '') + esc(res.message), res.kode || kode);
+    getar([300, 100, 300]);
+  }
+}
+
+function tampil(jenis, ikon, judul, ket, kode) {
+  var el = document.getElementById('hasil');
+  el.className = 'hasil on h-' + jenis;
+  el.innerHTML = '<div class="ikon">' + ikon + '</div><div class="judul">' + judul + '</div>' +
+    (ket ? '<div class="ket">' + ket + '</div>' : '') +
+    (kode ? '<div class="kode">' + esc(kode) + '</div>' : '');
+}
+
+function getar(pola) { try { if (navigator.vibrate) navigator.vibrate(pola); } catch (e) {} }
+
+function toggleKamera() {
+  var btn = document.getElementById('btnCam');
+  var note = document.getElementById('camNote');
+
+  if (kameraAktif) {
+    scanner.stop().then(function () {
+      scanner.clear(); kameraAktif = false; btn.textContent = 'Nyalakan Kamera';
+    });
+    return;
+  }
+  if (typeof Html5Qrcode === 'undefined') {
+    note.classList.remove('hide');
+    note.textContent = 'Library scanner gagal dimuat. Periksa koneksi internet.';
+    return;
+  }
+
+  btn.disabled = true; note.classList.add('hide');
+  scanner = scanner || new Html5Qrcode('reader');
+
+  scanner.start({ facingMode: 'environment' },
+    { fps: 10, qrbox: { width: 240, height: 240 } },
+    function (teks) { kirim(teks); }, function () {}
+  ).then(function () {
+    kameraAktif = true; btn.disabled = false; btn.textContent = 'Matikan Kamera';
+  }).catch(function (err) {
+    btn.disabled = false;
+    note.classList.remove('hide');
+    note.innerHTML = 'Kamera ditolak: ' + err + '<br>' +
+      'Kamera hanya bisa diakses lewat <b>https://</b> atau <b>http://localhost</b>. ' +
+      'Bila membuka berkas ini langsung dari HP, unggah dulu ke GitHub Pages / hosting statis apa pun.';
+  });
+}
+
+(function () {
+  try {
+    var u = localStorage.getItem('etix_url'), p = localStorage.getItem('etix_pin');
+    if (u) document.getElementById('url').value = u;
+    if (p) document.getElementById('pin').value = p;
+    if (u && p) simpan();
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>
